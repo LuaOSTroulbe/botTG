@@ -20,9 +20,9 @@ from aiohttp import ClientTimeout, TCPConnector
 # ОБХОД БЛОКИРОВКИ (ПРОСТОЙ И РАБОЧИЙ)
 # ============================================
 def create_session():
-    """Обычная сессия для Render"""
-    timeout = ClientTimeout(total=120, connect=30, sock_read=90)
-    return AiohttpSession(timeout=timeout)
+    """Сессия с прокси"""
+    PROXY_URL = "http://51.158.68.133:8811"
+    return AiohttpSession(proxy=PROXY_URL)
 
 # ностройкэ
 API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
