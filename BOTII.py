@@ -1,3 +1,4 @@
+
 import asyncio
 import json
 import os
@@ -27,7 +28,6 @@ def create_session():
 API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
 ADMIN_ID = 8420391742  # Твой Telegram ID
 DATA_FILE = "miner_data.json"
-
 
 # Редкости  и т.д
 class Rarity(Enum):
