@@ -14,7 +14,7 @@ API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
 HF_TOKEN = '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'  # ← Замени
 ADMIN_ID = 8420391742
 DATA_FILE = "ai_users.json"
-API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+API_URL = "API_URL = "API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
 
 def create_session():
     return AiohttpSession()
