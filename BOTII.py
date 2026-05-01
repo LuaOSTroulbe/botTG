@@ -1,242 +1,217 @@
-import os
-import json
 import asyncio
-import logging
-from typing import Dict, List
-from dotenv import load_dotenv
-import httpx
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import json
+import os
+import ssl
+from datetime import datetime
+from typing import Dict, Optional
 
-# Загрузка переменных окружения
-load_dotenv()
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import aiohttp
 
-# Конфигурация
-TELEGRAM_BOT_TOKEN = os.getenv("8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk")
-OPENROUTER_API_KEY = os.getenv("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")
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+# ============================================
+# НАСТРОЙКИ
+# ============================================
+API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
+OPENROUTER_API_KEY = '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'  # ← ЗАМЕНИ НА СВОЙ КЛЮЧ
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DATA_FILE = "ai_users.json"
+ADMIN_ID = 8420391742
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# ============================================
+# ОБХОД БЛОКИРОВКИ
+# ============================================
+def create_session():
+    return AiohttpSession()
 
-# Хранилище истории диалогов пользователей
-user_conversations: Dict[int, List[Dict[str, str]]] = {}
+# ============================================
+# ПАМЯТЬ ПОЛЬЗОВАТЕЛЕЙ
+# ============================================
+class UserData:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        self.data = self._load()
 
-# Конфигурация доступных моделей
-MODELS = {
-    "free": [
-        "google/gemini-2.0-flash-exp:free",     # Быстрый, хорошее качество
-        "google/gemma-2-9b-it:free",            # Компактная модель
-        "meta-llama/llama-3.2-3b-instruct:free", # Легкая Llama
-        "nousresearch/hermes-3-llama-3.1-405b:free" # Мощная модель
-    ],
-    "paid": [
-        "openai/gpt-4o",
-        "anthropic/claude-3.5-sonnet",
-        "google/gemini-pro-1.5"
-    ]
-}
+    def _load(self) -> Dict:
+        if os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                pass
+        return {"users": {}}
 
-class OpenRouterAI:
-    """Класс для работы с OpenRouter API"""
-    
+    def get_user(self, user_id: int) -> Dict:
+        uid = str(user_id)
+        if uid not in self.data["users"]:
+            self.data["users"][uid] = {
+                "name": "Пользователь",
+                "history": [],
+                "total_messages": 0,
+                "created_at": datetime.now().isoformat()
+            }
+        return self.data["users"][uid]
+
+    def add_message(self, user_id: int, role: str, content: str):
+        user = self.get_user(user_id)
+        user["history"].append({"role": role, "content": content})
+        if len(user["history"]) > 20:  # Держим последние 20 сообщений
+            user["history"] = user["history"][-20:]
+        user["total_messages"] += 1
+        self.save()
+
+    def save(self):
+        with open(self.file_path, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+# ============================================
+# ИИ ЛОГИКА (OpenRouter)
+# ============================================
+class AIBrain:
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.headers = {
-            "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "http://localhost:8000",  # Замените на ваш сайт
-            "X-Title": "ВацапочкИИ",              # Название вашего приложения
+        self.session = None
+
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(headers={
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
+        })
+        return self
+
+    async def __aexit__(self, *args):
+        if self.session:
+            await self.session.close()
+
+    async def chat(self, messages: list, model: str = "google/gemini-2.0-flash-001") -> str:
+        """Отправка запроса к OpenRouter"""
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": 1000,
+            "temperature": 0.7
         }
-    
-    async def get_response(self, messages: List[Dict[str, str]], model: str = "google/gemini-2.0-flash-exp:free") -> str:
-        """Получение ответа от AI модели"""
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                payload = {
-                    "model": model,
-                    "messages": messages,
-                    "temperature": 0.7,
-                    "max_tokens": 1000,
-                    "top_p": 1,
-                    "frequency_penalty": 0,
-                    "presence_penalty": 0
-                }
-                
-                response = await client.post(
-                    OPENROUTER_API_URL,
-                    headers=self.headers,
-                    json=payload
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
+            async with self.session.post(OPENROUTER_URL, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
                     return data["choices"][0]["message"]["content"]
                 else:
-                    logger.error(f"API Error: {response.status_code} - {response.text}")
-                    return f"⚠️ Ошибка API: {response.status_code}"
-                    
-        except httpx.TimeoutException:
-            return "⏰ Превышено время ожидания ответа"
+                    return f"❌ Ошибка API: {resp.status}"
         except Exception as e:
-            logger.error(f"Error: {str(e)}")
-            return f"❌ Произошла ошибка: {str(e)}"
+            return f"❌ Ошибка соединения: {str(e)[:50]}"
 
-# Инициализация AI клиента
-ai_client = OpenRouterAI(OPENROUTER_API_KEY)
+# ============================================
+# БОТ
+# ============================================
+class AIBot:
+    def __init__(self, token: str, api_key: str):
+        self.token = token
+        self.api_key = api_key
+        self.users = UserData(DATA_FILE)
+        self.dp = Dispatcher()
+        self._setup_handlers()
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start"""
-    user_id = update.effective_user.id
-    
-    welcome_message = (
-        "Привет! я ВацапочкИИ\n\n"
-        "Доступные команды:\n"
-        "/start - Начало работы\n"
-        "/help - Помощь и список моделей\n"
-        "/new - Начать новый диалог\n"
-        "/model - Выбрать модель AI\n"
-        "/models - Показать доступные модели\n\n"
-        "Просто напишите мне сообщение, и я отвечу!"
-    )
-    
-    await update.message.reply_text(welcome_message)
+    def _setup_handlers(self):
+        self.dp.message(Command("start"))(self.cmd_start)
+        self.dp.message(Command("clear"))(self.cmd_clear)
+        self.dp.message(Command("model"))(self.cmd_model)
+        self.dp.message(F.text)(self.handle_message)
+        self.dp.callback_query(F.data.startswith("model_"))(self.callback_model)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /help"""
-    help_text = (
-        "**ВацапочкИИ команды**\n\n"
-        "**Команды:**\n"
-        "/start - Запуск бота\n"
-        "/help - Это сообщение\n"
-        "/new - Начать новый диалог\n"
-        "/model [название] - Выбрать модель\n"
-        "/models - Показать модели\n\n"
-        "**Бесплатные модели:**\n"
-    )
-    
-    for model in MODELS["free"]:
-        help_text += f"• `{model}`\n"
-    
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    async def cmd_start(self, message: types.Message):
+        user = self.users.get_user(message.from_user.id)
+        user["name"] = message.from_user.full_name
 
-async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Начать новый диалог"""
-    user_id = update.effective_user.id
-    if user_id in user_conversations:
-        del user_conversations[user_id]
-    
-    await update.message.reply_text("🆕 Диалог очищен. Можете начинать новый разговор!")
-
-async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показать доступные модели"""
-    models_text = "📋 **Доступные модели:**\n\n**Бесплатные:**\n"
-    
-    for model in MODELS["free"]:
-        models_text += f"• `{model}`\n"
-    
-    models_text += "\nВыберите модель командой /model [название]"
-    
-    await update.message.reply_text(models_text, parse_mode='Markdown')
-
-async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Выбор модели AI"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Укажите название модели\n"
-            "Пример: `/model google/gemini-2.0-flash-exp:free`",
-            parse_mode='Markdown'
+        dev_tag = " 👑 Разработчик" if message.from_user.id == ADMIN_ID else ""
+        await message.answer(
+            f"🤖 *ИИ-Ассистент*\n\n"
+            f"👤 {message.from_user.full_name}{dev_tag}\n"
+            f"💬 Сообщений: {user['total_messages']}\n\n"
+            f"Я твой личный ИИ-помощник. Задай мне любой вопрос!\n\n"
+            f"📋 *Команды:*\n"
+            f"/clear - Очистить историю\n"
+            f"/model - Сменить модель ИИ",
+            parse_mode=ParseMode.MARKDOWN
         )
-        return
-    
-    model_name = context.args[0]
-    
-    # Проверяем, есть ли такая модель
-    all_models = MODELS["free"] + MODELS["paid"]
-    if model_name not in all_models:
-        await update.message.reply_text(f"❌ Модель '{model_name}' не найдена")
-        return
-    
-    # Сохраняем выбранную модель для пользователя
-    context.user_data["selected_model"] = model_name
-    
-    await update.message.reply_text(f"✅ Выбрана модель: `{model_name}`", parse_mode='Markdown')
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик текстовых сообщений"""
-    user_id = update.effective_user.id
-    user_message = update.message.text
-    
-    # Инициализация истории диалога
-    if user_id not in user_conversations:
-        user_conversations[user_id] = [
-            {"role": "system", "content": "Ты полезный и дружелюбный AI ассистент в Telegram."}
-        ]
-    
-    # Добавляем сообщение пользователя в историю
-    user_conversations[user_id].append({"role": "user", "content": user_message})
-    
-    # Показываем статус "печатает"
-    await update.message.chat.send_action(action="typing")
-    
-    # Получаем выбранную модель или используем по умолчанию
-    model = context.user_data.get("selected_model", "google/gemini-2.0-flash-exp:free")
-    
-    # Получаем ответ от AI
-    try:
-        ai_response = await ai_client.get_response(user_conversations[user_id], model)
+    async def cmd_clear(self, message: types.Message):
+        user = self.users.get_user(message.from_user.id)
+        user["history"] = []
+        self.users.save()
+        await message.answer("✅ История диалога очищена!")
+
+    async def cmd_model(self, message: types.Message):
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Gemini Flash (быстрый)", callback_data="model_gemini")
+        builder.button(text="GPT-3.5 Turbo", callback_data="model_gpt")
+        builder.button(text="Claude Haiku", callback_data="model_claude")
+        builder.adjust(1)
+        await message.answer("🎯 *Выбери модель ИИ:*", reply_markup=builder.as_markup(), parse_mode=ParseMode.MARKDOWN)
+
+    async def callback_model(self, callback: types.CallbackQuery):
+        model_map = {
+            "model_gemini": "google/gemini-2.0-flash-001",
+            "model_gpt": "openai/gpt-3.5-turbo",
+            "model_claude": "anthropic/claude-3-haiku"
+        }
+        model = model_map.get(callback.data, "google/gemini-2.0-flash-001")
+        user = self.users.get_user(callback.from_user.id)
+        user["current_model"] = model
+        self.users.save()
+        await callback.answer(f"✅ Модель: {model}", show_alert=True)
+        await callback.message.delete()
+
+    async def handle_message(self, message: types.Message):
+        user = self.users.get_user(message.from_user.id)
+        user["name"] = message.from_user.full_name
+
+        # Индикатор "печатает"
+        await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+
+        # Формируем контекст
+        system_msg = {
+            "role": "system",
+            "content": f"Ты - дружелюбный ИИ-ассистент. Общаешься с {message.from_user.full_name}. Отвечай на русском языке."
+        }
         
-        # Добавляем ответ AI в историю
-        user_conversations[user_id].append({"role": "assistant", "content": ai_response})
-        
-        # Отправляем ответ (разбиваем длинные сообщения)
-        if len(ai_response) > 4000:
-            for i in range(0, len(ai_response), 4000):
-                await update.message.reply_text(ai_response[i:i+4000])
-        else:
-            await update.message.reply_text(ai_response)
-            
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при получении ответа: {str(e)}")
+        model = user.get("current_model", "google/gemini-2.0-flash-001")
+        messages = [system_msg] + user["history"][-15:] + [{"role": "user", "content": message.text}]
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик ошибок"""
-    logger.error(f"Update {update} caused error {context.error}")
-    
-    if update and update.message:
-        await update.message.reply_text("❌ Произошла внутренняя ошибка. Попробуйте позже.")
+        # Запрос к ИИ
+        async with AIBrain(self.api_key) as ai:
+            response = await ai.chat(messages, model)
 
-def main() -> None:
-    """Запуск бота"""
-    # Проверяем наличие токенов
-    if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
-        raise ValueError("Необходимо указать TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY в .env файле")
-    
-    # Создаем приложение
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Регистрируем обработчики команд
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("new", new_chat_command))
-    application.add_handler(CommandHandler("model", model_command))
-    application.add_handler(CommandHandler("models", models_command))
-    
-    # Регистрируем обработчик сообщений
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Регистрируем обработчик ошибок
-    application.add_error_handler(error_handler)
-    
-    # Запускаем бота
-    logger.info("Запуск бота...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Сохраняем историю
+        self.users.add_message(message.from_user.id, "user", message.text)
+        self.users.add_message(message.from_user.id, "assistant", response)
+
+        # Отправляем ответ
+        await message.answer(response, parse_mode=ParseMode.MARKDOWN)
+
+    async def run(self):
+        session = create_session()
+        bot = Bot(token=self.token, session=session)
+        print("🤖 ИИ-Бот запускается...")
+        try:
+            me = await bot.get_me()
+            print(f"✅ Бот @{me.username} успешно запущен!")
+            await self.dp.start_polling(bot)
+        except Exception as e:
+            print(f"❌ Ошибка запуска: {e}")
+        finally:
+            await bot.session.close()
+
+async def main():
+    bot = AIBot(API_TOKEN, OPENROUTER_API_KEY)
+    await bot.run()
 
 if __name__ == "__main__":
-    main()
+    print("🤖 ИИ БОТ ДЛЯ TELEGRAM")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Бот завершает работу...")
