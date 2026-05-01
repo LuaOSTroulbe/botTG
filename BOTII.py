@@ -134,7 +134,7 @@ class GameData:
                     return json.load(f)
             except:
                 pass
-        return {"players": {}, "events": [], "global_stats": {"total_mined": 0, "next_player_id": 1}}
+        return {"players": {}, "events": [], "global_stats": {"total_mined": 0, "next_player_id": 1}, "logs": []}
 
     def _initialize_defaults(self):
         if "players" not in self.data:
@@ -143,6 +143,8 @@ class GameData:
             self.data["events"] = []
         if "global_stats" not in self.data:
             self.data["global_stats"] = {"total_mined": 0, "next_player_id": 1}
+        if "logs" not in self.data:
+            self.data["logs"] = []
         if "next_player_id" not in self.data["global_stats"]:
             self.data["global_stats"]["next_player_id"] = 1
 
@@ -181,7 +183,6 @@ class GameData:
         }
 
     def add_log(self, user_id: int, username: str, action: str):
-        if "logs" not in self.data: self.data["logs"] = []
         self.data["logs"].append({
             "user_id": user_id,
             "username": username,
@@ -232,7 +233,7 @@ class MinerGame:
 
         player["mine_resources"] = max(0, player["mine_resources"] - amount)
         player["energy"] = max(0, player["energy"] - 10)
-        player["pickaxe_durability"] = max(0, player["pickaxe_durability"] - random.randint(1, 3))
+        player["pickaxe_durability"] = max(0, player["pickaxe_durability"] - random.randint(1, 2))
         player["total_mined"] += amount
         player["damage_dealt"] += amount
         player["last_mine"] = datetime.now().isoformat()
@@ -295,6 +296,7 @@ class MinerGame:
         return True, f"✅ Продано {amount}x {resource.emoji} {resource.name} за {price:.1f} 💰"
 
     def buy_resource(self, player: Dict, resource_name: str, amount: int) -> Tuple[bool, str]:
+        """Покупка руды в магазине"""
         if resource_name not in RESOURCES:
             return False, "❌ Неизвестный ресурс!"
         resource = RESOURCES[resource_name]
@@ -502,10 +504,18 @@ class MinerBot:
                 return uid, p
         return None
 
+    def _get_player_by_username(self, username: str) -> Optional[Tuple[str, Dict]]:
+        for uid, p in self.game_data.data["players"].items():
+            if p.get("tg_name", "").lower() == username.lower():
+                return uid, p
+        return None
+
     async def notify_all(self, text: str, bot: Bot):
         for uid in self.game_data.data["players"]:
-            try: await bot.send_message(int(uid), f"📢 {text}")
-            except: pass
+            try:
+                await bot.send_message(int(uid), text)
+            except:
+                pass
 
     async def on_bot_added_to_group(self, event: types.ChatMemberUpdated):
         chat = event.chat
@@ -513,7 +523,8 @@ class MinerBot:
             try:
                 self.game_data.get_player(event.from_user.id)
                 self.game_data.save()
-            except: pass
+            except:
+                pass
 
     async def on_group_message(self, message: types.Message):
         p = self.game_data.get_player(message.from_user.id)
@@ -522,7 +533,7 @@ class MinerBot:
 
     async def cmd_text_mine(self, message: types.Message):
         player = self.game_data.get_player(message.from_user.id)
-        player["name"] = message.from_user.full_name
+        player["tg_name"] = message.from_user.full_name
         self.game.restore_energy(player)
         self.game.restore_mine(player)
         can_mine, msg = self.game.can_mine(player)
@@ -543,6 +554,7 @@ class MinerBot:
                 f"⛏️ Прочность кирки: {player['pickaxe_durability']}/{pickaxe.durability}\n"
                 f"💎 Ресурсов в шахте: {player['mine_resources']}/{player['mine_max']}"
             )
+            self.game_data.add_log(message.from_user.id, message.from_user.full_name, f"Добыл: {', '.join([f'{RESOURCES[n].name} x{a}' for n,a in mined.items()])}")
         else:
             text = "🤷 Ничего не добыто. Попробуй еще раз!"
         self.game_data.save()
@@ -658,7 +670,7 @@ class MinerBot:
 
     async def cmd_start(self, message: types.Message):
         player = self.game_data.get_player(message.from_user.id)
-        player["name"] = message.from_user.full_name
+        player["tg_name"] = message.from_user.full_name
         dev_tag = " 🛠 Разработчик" if message.from_user.id == self.admin_id else ""
         ban_status = " 🚫 ЗАБЛОКИРОВАНЫЙ АККАУНТ" if player.get("banned", False) else ""
         await message.answer(
@@ -679,256 +691,651 @@ class MinerBot:
         )
 
     async def cmd_id(self, message: types.Message):
-        p = self.game_data.get_player(message.from_user.id)
-        await message.answer(f"🆔 Твой ID: {p['player_id']}")
+        if message.reply_to_message:
+            target_id = message.reply_to_message.from_user.id
+            p = self.game_data.get_player(target_id)
+            await message.answer(f"🆔 ID пользователя {message.reply_to_message.from_user.full_name}: {p['player_id']}")
+        else:
+            p = self.game_data.get_player(message.from_user.id)
+            await message.answer(f"🆔 Твой ID: {p['player_id']}")
 
     async def cmd_pay(self, message: types.Message, command: CommandObject):
         args = command.args.split() if command.args else []
-        if len(args) < 2: await message.answer("❌ /pay ID СУММА"); return
-        target_id = int(args[0]); amount = float(args[1])
-        if amount <= 0: await message.answer("❌ Сумма > 0!"); return
+        if len(args) < 2:
+            await message.answer("❌ /pay ID СУММА")
+            return
+        target_id = int(args[0])
+        amount = float(args[1])
+        if amount <= 0:
+            await message.answer("❌ Сумма должна быть положительной!")
+            return
         result = self._get_player_by_id(target_id)
-        if not result: await message.answer("❌ Игрок не найден!"); return
+        if not result:
+            await message.answer("❌ Игрок не найден!")
+            return
         to_uid, to_player = result
         from_player = self.game_data.get_player(message.from_user.id)
-        if from_player["balance"] < amount: await message.answer("❌ Недостаточно денег!"); return
-        from_player["balance"] -= amount; to_player["balance"] += amount
+        if from_player["balance"] < amount:
+            await message.answer("❌ Недостаточно денег!")
+            return
+        from_player["balance"] -= amount
+        to_player["balance"] += amount
         self.game_data.add_log(message.from_user.id, message.from_user.full_name, f"Перевел {amount}💰 игроку #{target_id}")
         self.game_data.save()
         await message.answer(f"✅ Переведено {amount:.1f} 💰 игроку #{target_id}")
-        try: await message.bot.send_message(int(to_uid), f"💰 Игрок #{from_player['player_id']} перевел вам {amount:.1f} 💰")
-        except: pass
+        try:
+            await message.bot.send_message(int(to_uid), f"💰 Игрок #{from_player['player_id']} перевел вам {amount:.1f} 💰")
+        except:
+            pass
 
     async def cmd_admin(self, message: types.Message):
-        if not self._is_admin_or_dev(message.from_user.id): return
+        if not self._is_admin_or_dev(message.from_user.id):
+            return
         await message.answer(
             "👑 *Админ-панель*\n\n"
-            "/event x2 - x2 добыча\n/event x3 - x3 добыча\n/event luckytime - Ящик\n/event energize - Энергия\n/event halfprice - Скидка 50%\n"
-            "/event reset - Сброс ивентов\n/event restore_mines - Восстановить шахты\n/event give_money ID СУММА\n"
-            "/announce ТЕКСТ - Оповещение всем\n/logs [число] - Логи\n/logall - Все логи\n"
-            "/ban ID | /unban ID | /setpickaxe ID УР | /sethouse ID УР | /resetplayer ID",
+            "Доступные команды:\n"
+            "/event x2 - Запустить ивент x2 добыча\n"
+            "/event x3 - Запустить ивент x3 добыча\n"
+            "/event luckytime - Ящик с сюрпризом (шанс на редкий предмет)\n"
+            "/event energize - Полное восстановление энергии всем\n"
+            "/event halfprice - Скидка 50% на всё в магазине\n"
+            "/event reset - Сбросить ивенты\n"
+            "/event restore_mines - Восстановить все шахты\n"
+            "/event give_money {id} {amount} - Выдать деньги\n"
+            "/announce ТЕКСТ - Оповещение всем\n"
+            "/logs [число] - Логи\n"
+            "/logall - Все логи\n"
+            "/ban {player_id} - Заблокировать игрока\n"
+            "/unban {player_id} - Разблокировать игрока\n"
+            "/setpickaxe {player_id} {level} - Установить уровень кирки\n"
+            "/sethouse {player_id} {level} - Установить уровень дома\n"
+            "/resetplayer {player_id} - Сбросить игрока",
             parse_mode=ParseMode.MARKDOWN
         )
 
-    async def cmd_event(self, message: types.Message, command: CommandObject):
-        if not self._is_admin_or_dev(message.from_user.id): return
-        args = command.args.split() if command.args else []
-        if not args: return
-        event_type = args[0]; msg = ""
-        if event_type == "x2":
-            for p in self.game_data.data["players"].values(): p["bonuses"]["xp_multiplier"] = 2.0
-            msg = "🎉 Ивент: x2 добыча!"
-        elif event_type == "x3":
-            for p in self.game_data.data["players"].values(): p["bonuses"]["xp_multiplier"] = 3.0
-            msg = "🎉 Ивент: x3 добыча!"
-        elif event_type == "luckytime":
-            for uid, p in self.game_data.data["players"].items():
-                if not p.get("banned") and random.random() < 0.3:
-                    r = random.choice(["diamond","emerald","mythril","platinum"])
-                    p["inventory"][r] = p["inventory"].get(r,0) + random.randint(1,3)
-            msg = "🎉 Ящик с сюрпризом открыт!"
-        elif event_type == "energize":
-            for p in self.game_data.data["players"].values(): p["energy"] = p["max_energy"]
-            msg = "⚡ Энергия восстановлена!"
-        elif event_type == "halfprice":
-            for p in self.game_data.data["players"].values(): p["bonuses"]["coin_multiplier"] = 0.5
-            msg = "🏷️ Скидка 50% в магазине!"
-        elif event_type == "reset":
-            for p in self.game_data.data["players"].values(): p["bonuses"]["xp_multiplier"] = 1.0; p["bonuses"]["coin_multiplier"] = 1.0
-            msg = "✅ Ивенты сброшены!"
-        elif event_type == "restore_mines":
-            for p in self.game_data.data["players"].values(): p["mine_resources"] = p["mine_max"]
-            msg = "✅ Шахты восстановлены!"
-        elif event_type == "give_money" and len(args) >= 3:
-            r = self._get_player_by_id(int(args[1]))
-            if r: r[1]["balance"] += float(args[2]); msg = f"✅ Выдано {args[2]} 💰"
-        self.game_data.save()
-        if msg:
-            await message.answer(msg)
-            await self.notify_all(msg, message.bot)
-
     async def cmd_announce(self, message: types.Message, command: CommandObject):
-        if not self._is_admin_or_dev(message.from_user.id): return
+        if not self._is_admin_or_dev(message.from_user.id):
+            return
         text = command.args
-        if not text: await message.answer("❌ /announce ТЕКСТ"); return
-        await self.notify_all(f"📢 Объявление:\n{text}", message.bot)
-        await message.answer("✅ Отправлено!")
+        if not text:
+            await message.answer("❌ /announce ТЕКСТ")
+            return
+        await self.notify_all(f"📢 Объявление от разработчика:\n{text}", message.bot)
+        await message.answer("✅ Оповещение отправлено всем!")
 
     async def cmd_logs(self, message: types.Message, command: CommandObject):
-        if not self._is_admin_or_dev(message.from_user.id): return
+        if not self._is_admin_or_dev(message.from_user.id):
+            return
         args = command.args.split() if command.args else []
         count = int(args[0]) if args else 10
         logs = self.game_data.data.get("logs", [])[-count:]
-        if not logs: await message.answer("📋 Логи пусты"); return
-        text = "📋 Последние действия:\n\n"
-        for log in logs: text += f"👤 {log['username']} (ID:{log['user_id']}): {log['action']}\n"
-        await message.answer(text)
+        if not logs:
+            await message.answer("📋 Логи пусты")
+            return
+        text = "📋 *Последние действия:*\n\n"
+        for log in logs:
+            text += f"👤 {log['username']} (ID:{log['user_id']}): {log['action']}\n"
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
 
     async def cmd_logall(self, message: types.Message):
-        if not self._is_admin_or_dev(message.from_user.id): return
-        logs = self.game_data.data.get("logs", [])
-        if not logs: await message.answer("📋 Логи пусты"); return
-        text = f"📋 Всего записей: {len(logs)}\n\n"
-        for log in logs[-30:]: text += f"👤 {log['username']} (ID:{log['user_id']}): {log['action']}\n"
-        await message.answer(text)
-
-    async def cmd_ban(self, message: types.Message, command: CommandObject):
-        if not self._is_admin_or_dev(message.from_user.id): return
-        args = command.args.split() if command.args else []
-        if not args: return
-        r = self._get_player_by_id(int(args[0]))
-        if r: r[1]["banned"] = True; self.game_data.save(); await message.answer(f"🚫 Игрок #{args[0]} заблокирован!")
-
-    async def cmd_unban(self, message: types.Message, command: CommandObject):
-        if not self._is_admin_or_dev(message.from_user.id): return
-        args = command.args.split() if command.args else []
-        if not args: return
-        r = self._get_player_by_id(int(args[0]))
-        if r: r[1]["banned"] = False; self.game_data.save(); await message.answer(f"✅ Игрок #{args[0]} разблокирован!")
-
-    async def cmd_setpickaxe(self, message: types.Message, command: CommandObject):
-        if not self._is_admin_or_dev(message.from_user.id): return
-        args = command.args.split() if command.args else []
-        if len(args) < 2: return
-        r = self._get_player_by_id(int(args[0]))
-        if r: r[1]["pickaxe_level"] = int(args[1]); self.game_data.save()
-
-    async def cmd_sethouse(self, message: types.Message, command: CommandObject):
-        if not self._is_admin_or_dev(message.from_user.id): return
-        args = command.args.split() if command.args else []
-        if len(args) < 2: return
-        r = self._get_player_by_id(int(args[0]))
-        if r: r[1]["house_level"] = int(args[1]); self.game_data.save()
-
-    async def cmd_resetplayer(self, message: types.Message, command: CommandObject):
-        if not self._is_admin_or_dev(message.from_user.id): return
-        args = command.args.split() if command.args else []
-        if not args: return
-        r = self._get_player_by_id(int(args[0]))
-        if r:
-            r[1].update({"balance":100,"pickaxe_level":1,"house_level":0,"inventory":{},"total_mined":0,"energy":100})
-            self.game_data.save()
-
-    async def callback_mine(self, callback: types.CallbackQuery):
-        player = self.game_data.get_player(callback.from_user.id)
-        self.game.restore_energy(player)
-        self.game.restore_mine(player)
-        can_mine, message = self.game.can_mine(player)
-        if not can_mine:
-            await callback.answer(message, show_alert=True)
+        if not self._is_admin_or_dev(message.from_user.id):
             return
-        mined = self.game.mine(player)
-        if mined:
-            resources_text = "\n".join([
-                f"{RESOURCES[name].emoji} {RESOURCES[name].name}: {amount} шт."
-                for name, amount in mined.items()
-            ])
-            pickaxe = PICKAXES[player["pickaxe_level"]]
-            text = (
-                f"⛏️ *Добыча завершена!*\n\n"
-                f"Добыто:\n{resources_text}\n\n"
-                f"⚡ Энергия: {player['energy']}/{player['max_energy']}\n"
-                f"⛏️ Прочность кирки: {player['pickaxe_durability']}/{pickaxe.durability}\n"
-                f"💎 Ресурсов в шахте: {player['mine_resources']}/{player['mine_max']}"
-            )
+        logs = self.game_data.data.get("logs", [])
+        if not logs:
+            await message.answer("📋 Логи пусты")
+            return
+        text = f"📋 *Всего записей: {len(logs)}*\n\n"
+        for log in logs[-30:]:
+            text += f"👤 {log['username']} (ID:{log['user_id']}): {log['action']}\n"
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_event(self, message: types.Message, command: CommandObject):
+    if not self._is_admin_or_dev(message.from_user.id):
+        return
+    args = command.args.split() if command.args else []
+    if not args:
+        await message.answer("❌ Укажи тип ивента!\nДоступные: x2, x3, luckytime, energize, halfprice, reset, restore_mines, give_money")
+        return
+    event_type = args[0]
+    msg = ""
+
+    if event_type == "x2":
+        for player in self.game_data.data["players"].values():
+            player["bonuses"]["coin_multiplier"] = 2.0
+            player["bonuses"]["xp_multiplier"] = 2.0
+        self.game_data.data["events"].append({
+            "type": "x2",
+            "started": datetime.now().isoformat(),
+            "duration": 3600
+        })
+        self.game_data.save()
+        msg = "🎉 Ивент: x2 добыча! Действует 1 час!"
+
+    elif event_type == "x3":
+        for player in self.game_data.data["players"].values():
+            player["bonuses"]["coin_multiplier"] = 3.0
+            player["bonuses"]["xp_multiplier"] = 3.0
+        self.game_data.data["events"].append({
+            "type": "x3",
+            "started": datetime.now().isoformat(),
+            "duration": 1800
+        })
+        self.game_data.save()
+        msg = "🎉 Ивент: x3 добыча! Действует 30 минут!"
+
+    elif event_type == "luckytime":
+        lucky_players = []
+        for uid, player in self.game_data.data["players"].items():
+            if not player.get("banned", False) and random.random() < 0.3:
+                rare_resources = ["diamond", "emerald", "mythril", "platinum"]
+                chosen = random.choice(rare_resources)
+                player["inventory"][chosen] = player["inventory"].get(chosen, 0) + random.randint(1, 5)
+                lucky_players.append(player.get("tg_name", player["name"]))
+        self.game_data.save()
+        if lucky_players:
+            msg = f"🎉 Ящик с сюрпризом открыт!\nСчастливчики: {', '.join(lucky_players[:5])}"
         else:
-            text = "🤷 Ничего не добыто. Попробуй еще раз!"
+            msg = "🎉 Ящик с сюрпризом открыт! Но никто не получил редкий ресурс."
+
+    elif event_type == "energize":
+        for player in self.game_data.data["players"].values():
+            player["energy"] = player["max_energy"]
         self.game_data.save()
-        await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode=ParseMode.MARKDOWN)
+        msg = "⚡ Энергия полностью восстановлена всем игрокам!"
 
-    async def callback_stats(self, callback: types.CallbackQuery):
-        await self.show_stats(callback, callback.from_user.id)
-
-    async def callback_inventory(self, callback: types.CallbackQuery):
-        await self.show_inventory(callback, callback.from_user.id)
-
-    async def callback_shop(self, callback: types.CallbackQuery):
-        await self.show_shop(callback, callback.from_user.id)
-
-    async def callback_realty(self, callback: types.CallbackQuery):
-        await self.show_realty(callback, callback.from_user.id)
-
-    async def callback_pickaxe_menu(self, callback: types.CallbackQuery):
-        await self.show_pickaxe(callback, callback.from_user.id)
-
-    async def callback_leaderboard(self, callback: types.CallbackQuery):
-        await self.show_leaderboard(callback)
-        await callback.answer()
-
-    async def callback_shop_resource(self, callback: types.CallbackQuery):
-        res_name = callback.data.split("_")[1]
-        resource = RESOURCES[res_name]
-        text = f"{resource.emoji} *{resource.name}*\n\n📈 Продажа: {resource.sell_price:.1f}💰\n📉 Покупка: {resource.buy_price:.1f}💰"
-        builder = InlineKeyboardBuilder()
-        builder.button(text="🛒 Купить 1", callback_data=f"buyres_{res_name}")
-        builder.button(text="💰 Продать всё", callback_data=f"sell_{res_name}")
-        builder.button(text="🔙 Назад", callback_data="shop")
-        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode=ParseMode.MARKDOWN)
-
-    async def callback_buy_resource(self, callback: types.CallbackQuery):
-        res_name = callback.data.split("_")[1]
-        player = self.game_data.get_player(callback.from_user.id)
-        success, message = self.game.buy_resource(player, res_name, 1)
+    elif event_type == "halfprice":
+        for player in self.game_data.data["players"].values():
+            player["bonuses"]["coin_multiplier"] = 0.5
+        self.game_data.data["events"].append({
+            "type": "halfprice",
+            "started": datetime.now().isoformat(),
+            "duration": 3600
+        })
         self.game_data.save()
+        msg = "🏷️ Скидка 50% на всё в магазине! Действует 1 час!"
+
+    elif event_type == "reset":
+        for player in self.game_data.data["players"].values():
+            player["bonuses"]["coin_multiplier"] = 1.0
+            player["bonuses"]["xp_multiplier"] = 1.0
+        self.game_data.data["events"] = []
+        self.game_data.save()
+        msg = "✅ Все ивенты сброшены!"
+
+    elif event_type == "restore_mines":
+        for player in self.game_data.data["players"].values():
+            player["mine_resources"] = player["mine_max"]
+        self.game_data.save()
+        msg = "✅ Все шахты восстановлены!"
+
+    elif event_type == "give_money" and len(args) >= 3:
+        target_id = int(args[1])
+        amount = float(args[2])
+        result = self._get_player_by_id(target_id)
+        if not result:
+            await message.answer("❌ Игрок не найден!")
+            return
+        uid, player = result
+        player["balance"] += amount
+        self.game_data.save()
+        msg = f"✅ Выдано {amount:.0f} 💰 игроку #{target_id}"
+
+    if msg:
+        await message.answer(msg)
+        await self.notify_all(f"📢 {msg}", message.bot)
+        self.game_data.add_log(message.from_user.id, "Админ", f"Ивент: {msg}")
+
+async def cmd_ban(self, message: types.Message, command: CommandObject):
+    if not self._is_admin_or_dev(message.from_user.id):
+        return
+    args = command.args.split() if command.args else []
+    if not args:
+        await message.answer("❌ Укажи ID игрока: /ban {player_id}")
+        return
+    player_id = int(args[0])
+    result = self._get_player_by_id(player_id)
+    if not result:
+        await message.answer("❌ Игрок не найден!")
+        return
+    uid, player = result
+    if uid == str(self.admin_id):
+        await message.answer("❌ Нельзя заблокировать разработчика!")
+        return
+    player["banned"] = True
+    self.game_data.add_log(message.from_user.id, "Админ", f"Заблокировал игрока #{player_id}")
+    self.game_data.save()
+    await message.answer(f"🚫 Игрок #{player_id} ({player.get('tg_name', player['name'])}) заблокирован!")
+
+async def cmd_unban(self, message: types.Message, command: CommandObject):
+    if not self._is_admin_or_dev(message.from_user.id):
+        return
+    args = command.args.split() if command.args else []
+    if not args:
+        await message.answer("❌ Укажи ID игрока: /unban {player_id}")
+        return
+    player_id = int(args[0])
+    result = self._get_player_by_id(player_id)
+    if not result:
+        await message.answer("❌ Игрок не найден!")
+        return
+    uid, player = result
+    player["banned"] = False
+    self.game_data.add_log(message.from_user.id, "Админ", f"Разблокировал игрока #{player_id}")
+    self.game_data.save()
+    await message.answer(f"✅ Игрок #{player_id} ({player.get('tg_name', player['name'])}) разблокирован!")
+
+async def cmd_setpickaxe(self, message: types.Message, command: CommandObject):
+    if not self._is_admin_or_dev(message.from_user.id):
+        return
+    args = command.args.split() if command.args else []
+    if len(args) < 2:
+        await message.answer("❌ Формат: /setpickaxe {player_id} {level}")
+        return
+    player_id = int(args[0])
+    level = int(args[1])
+    if level not in PICKAXES:
+        await message.answer("❌ Неверный уровень кирки (1-7)!")
+        return
+    result = self._get_player_by_id(player_id)
+    if not result:
+        await message.answer("❌ Игрок не найден!")
+        return
+    uid, player = result
+    player["pickaxe_level"] = level
+    player["pickaxe_durability"] = PICKAXES[level].durability
+    self.game_data.save()
+    await message.answer(f"✅ Игроку #{player_id} установлена кирка уровня {level}!")
+
+async def cmd_sethouse(self, message: types.Message, command: CommandObject):
+    if not self._is_admin_or_dev(message.from_user.id):
+        return
+    args = command.args.split() if command.args else []
+    if len(args) < 2:
+        await message.answer("❌ Формат: /sethouse {player_id} {level}")
+        return
+    player_id = int(args[0])
+    level = int(args[1])
+    if level not in HOUSES:
+        await message.answer("❌ Неверный уровень дома (0-5)!")
+        return
+    result = self._get_player_by_id(player_id)
+    if not result:
+        await message.answer("❌ Игрок не найден!")
+        return
+    uid, player = result
+    player["house_level"] = level
+    player["house_defense"] = HOUSES[level].defense
+    player["max_energy"] = 100 + HOUSES[level].daily_bonus
+    self.game_data.save()
+    await message.answer(f"✅ Игроку #{player_id} установлен дом уровня {level}!")
+
+async def cmd_resetplayer(self, message: types.Message, command: CommandObject):
+    if not self._is_admin_or_dev(message.from_user.id):
+        return
+    args = command.args.split() if command.args else []
+    if not args:
+        await message.answer("❌ Укажи ID игрока: /resetplayer {player_id}")
+        return
+    player_id = int(args[0])
+    result = self._get_player_by_id(player_id)
+    if not result:
+        await message.answer("❌ Игрок не найден!")
+        return
+    uid, player = result
+    if uid == str(self.admin_id):
+        await message.answer("❌ Нельзя сбросить разработчика!")
+        return
+    player.update({
+        "balance": 100.0,
+        "pickaxe_level": 1,
+        "house_level": 0,
+        "mine_resources": 100,
+        "mine_max": 100,
+        "mine_level": 1,
+        "inventory": {},
+        "total_mined": 0,
+        "damage_dealt": 0,
+        "energy": 100,
+        "max_energy": 100,
+        "pickaxe_durability": PICKAXES[1].durability,
+        "house_defense": 0,
+        "bonuses": {"xp_multiplier": 1.0, "coin_multiplier": 1.0},
+        "achievements": []
+    })
+    self.game_data.add_log(message.from_user.id, "Админ", f"Сбросил игрока #{player_id}")
+    self.game_data.save()
+    await message.answer(f"✅ Игрок #{player_id} сброшен до начального состояния!")
+
+async def callback_mine(self, callback: types.CallbackQuery):
+    player = self.game_data.get_player(callback.from_user.id)
+    player["tg_name"] = callback.from_user.full_name
+    self.game.restore_energy(player)
+    self.game.restore_mine(player)
+    can_mine, message = self.game.can_mine(player)
+    if not can_mine:
         await callback.answer(message, show_alert=True)
+        return
+    mined = self.game.mine(player)
+    if mined:
+        resources_text = "\n".join([
+            f"{RESOURCES[name].emoji} {RESOURCES[name].name}: {amount} шт."
+            for name, amount in mined.items()
+        ])
+        pickaxe = PICKAXES[player["pickaxe_level"]]
+        text = (
+            f"⛏️ *Добыча завершена!*\n\n"
+            f"Добыто:\n{resources_text}\n\n"
+            f"⚡ Энергия: {player['energy']}/{player['max_energy']}\n"
+            f"⛏️ Прочность кирки: {player['pickaxe_durability']}/{pickaxe.durability}\n"
+            f"💎 Ресурсов в шахте: {player['mine_resources']}/{player['mine_max']}"
+        )
+        self.game_data.add_log(callback.from_user.id, callback.from_user.full_name, f"Добыл: {', '.join([f'{RESOURCES[n].name} x{a}' for n,a in mined.items()])}")
+    else:
+        text = "🤷 Ничего не добыто. Попробуй еще раз!"
+    self.game_data.save()
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-    async def callback_sell(self, callback: types.CallbackQuery):
-        res_name = callback.data.split("_")[1]
-        player = self.game_data.get_player(callback.from_user.id)
-        amount = player["inventory"].get(res_name, 0)
-        if amount == 0: await callback.answer("❌ Нет этого ресурса!", show_alert=True); return
-        success, message = self.game.sell_resource(player, res_name, amount)
-        self.game_data.save()
-        await callback.answer(message, show_alert=True)
+async def callback_stats(self, callback: types.CallbackQuery):
+    player = self.game_data.get_player(callback.from_user.id)
+    pickaxe = PICKAXES[player["pickaxe_level"]]
+    house = HOUSES[player["house_level"]]
+    dev_tag = " 🛠 Разработчик" if callback.from_user.id == self.admin_id else ""
+    ban_status = " 🚫 АККАУНТ ЗАБЛОКИРОВАН" if player.get("banned", False) else ""
 
-    async def callback_buy_pickaxe(self, callback: types.CallbackQuery):
-        level = int(callback.data.split("_")[2])
-        player = self.game_data.get_player(callback.from_user.id)
-        if level <= player["pickaxe_level"]: await callback.answer("❌ Уже есть!", show_alert=True); return
-        success, message = self.game.upgrade_pickaxe(player)
-        self.game_data.save()
-        await callback.answer(message, show_alert=True)
+    text = (
+        f"📊 *Профиль #{player['player_id']}*\n"
+        f"👤 Имя: {callback.from_user.full_name}\n"
+        f"{dev_tag}{ban_status}\n\n"
+        f"💰 Баланс: {player['balance']:.1f}\n"
+        f"⚡ Энергия: {player['energy']}/{player['max_energy']}\n"
+        f"🔨 Кирка: {pickaxe.emoji} {pickaxe.name} (ур.{pickaxe.level})\n"
+        f"⛏️ Прочность кирки: {player['pickaxe_durability']}/{pickaxe.durability}\n"
+        f"🏠 Дом: {house.emoji} {house.name} (ур.{house.level})\n"
+        f"🛡️ Прочность дома: {player['house_defense']:.0f}/{house.max_defense}\n"
+        f"⛏️ Шахта: {player['mine_resources']}/{player['mine_max']} "
+        f"(ур.{player['mine_level']})\n"
+        f"💎 Всего добыто: {player['total_mined']}\n"
+        f"🎒 Ресурсов в инвентаре: {len(player['inventory'])} видов\n"
+    )
+    if player["bonuses"]["coin_multiplier"] > 1:
+        text += f"\n🎉 Активен бонус x{player['bonuses']['coin_multiplier']}!"
+    elif player["bonuses"]["coin_multiplier"] < 1:
+        text += f"\n🏷️ Скидка 50% в магазине!"
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-    async def callback_buy_house(self, callback: types.CallbackQuery):
-        level = int(callback.data.split("_")[2])
-        player = self.game_data.get_player(callback.from_user.id)
-        success, message = self.game.buy_house(player, level)
-        self.game_data.save()
-        await callback.answer(message, show_alert=True)
+async def callback_inventory(self, callback: types.CallbackQuery):
+    player = self.game_data.get_player(callback.from_user.id)
+    if not player["inventory"]:
+        text = "🎒 *Инвентарь пуст*\n\nНачни копать, чтобы добыть ресурсы!"
+    else:
+        items_text = "\n".join([
+            f"{RESOURCES[name].emoji} {RESOURCES[name].name}: {amount} шт. "
+            f"(~{RESOURCES[name].sell_price * amount:.0f}💰)"
+            for name, amount in sorted(
+                player["inventory"].items(),
+                key=lambda x: RESOURCES[x[0]].sell_price,
+                reverse=True
+            )
+        ])
+        total_value = sum(
+            RESOURCES[name].sell_price * amount
+            for name, amount in player["inventory"].items()
+        )
+        text = (
+            f"🎒 *Инвентарь*\n\n"
+            f"{items_text}\n\n"
+            f"💰 Общая стоимость: {total_value:.0f}"
+        )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад", callback_data="back_main")
+    await callback.message.edit_text(
+        text,
+        reply_markup=builder.as_markup(),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-    async def callback_repair_house(self, callback: types.CallbackQuery):
-        player = self.game_data.get_player(callback.from_user.id)
-        success, message = self.game.repair_house(player)
-        self.game_data.save()
-        await callback.answer(message, show_alert=True)
+async def callback_shop(self, callback: types.CallbackQuery):
+    player = self.game_data.get_player(callback.from_user.id)
+    shop_text = "🏪 *Магазин ресурсов*\n\nВыберите ресурс для покупки или продажи:\n\n"
+    shop_text += "\n".join([
+        f"{r.emoji} {r.name} ({r.rarity.rarity_name})\n"
+        f"  📈 Курс: продажа {r.sell_price:.1f}💰 | покупка {r.buy_price:.1f}💰"
+        for r in RESOURCES.values()
+    ])
+    shop_text += f"\n\n💰 Твой баланс: {player['balance']:.1f}"
+    await callback.message.edit_text(
+        shop_text,
+        reply_markup=get_shop_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-    async def callback_repair_pickaxe(self, callback: types.CallbackQuery):
-        player = self.game_data.get_player(callback.from_user.id)
-        success, message = self.game.repair_pickaxe(player)
-        self.game_data.save()
-        await callback.answer(message, show_alert=True)
+async def callback_shop_resource(self, callback: types.CallbackQuery):
+    res_name = callback.data.split("_")[1]
+    resource = RESOURCES[res_name]
+    text = (
+        f"{resource.emoji} *{resource.name}* ({resource.rarity.rarity_name})\n\n"
+        f"📈 Курс продажи: {resource.sell_price:.1f}💰/шт.\n"
+        f"📉 Курс покупки: {resource.buy_price:.1f}💰/шт.\n\n"
+        f"Выберите действие:"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_resource_action_keyboard(res_name),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-    async def callback_back_main(self, callback: types.CallbackQuery):
-        await callback.message.edit_text("⛏️ *Главное меню*", reply_markup=get_main_keyboard(), parse_mode=ParseMode.MARKDOWN)
+async def callback_buy_resource(self, callback: types.CallbackQuery):
+    res_name = callback.data.split("_")[1]
+    player = self.game_data.get_player(callback.from_user.id)
+    resource = RESOURCES[res_name]
+    success, message = self.game.buy_resource(player, res_name, 1)
+    self.game_data.add_log(callback.from_user.id, callback.from_user.full_name, f"Купил {resource.name}")
+    self.game_data.save()
+    await callback.answer(message, show_alert=True)
+    await self.callback_shop(callback)
+
+async def callback_realty(self, callback: types.CallbackQuery):
+    player = self.game_data.get_player(callback.from_user.id)
+    house = HOUSES[player["house_level"]]
+    text = (
+        f"🏠 *Недвижимость*\n\n"
+        f"Текущий дом: {house.emoji} {house.name}\n"
+        f"🛡️ Прочность: {player['house_defense']:.0f}/{house.max_defense}\n"
+        f"⚡ Бонус энергии: +{house.daily_bonus}\n\n"
+        f"*Доступные дома:*\n\n"
+    )
+    for level, h in HOUSES.items():
+        if level > player["house_level"]:
+            text += (
+                f"{h.emoji} *{h.name}* (ур.{level})\n"
+                f"🛡️ Прочность: {h.max_defense}\n"
+                f"⚡ Бонус энергии: +{h.daily_bonus}\n"
+                f"💰 Цена: {h.price:.0f}\n\n"
+            )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_house_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def callback_pickaxe_menu(self, callback: types.CallbackQuery):
+    player = self.game_data.get_player(callback.from_user.id)
+    pickaxe = PICKAXES[player["pickaxe_level"]]
+    text = (
+        f"🔨 *Кирка*\n\n"
+        f"Текущая: {pickaxe.emoji} {pickaxe.name} (ур.{pickaxe.level})\n"
+        f"⛏️ Эффективность: {pickaxe.efficiency} ед. за удар\n"
+        f"💪 Прочность: {player['pickaxe_durability']}/{pickaxe.durability}\n\n"
+        f"*Доступные кирки:*\n\n"
+    )
+    for level, p in PICKAXES.items():
+        if level > player["pickaxe_level"]:
+            text += (
+                f"{p.emoji} *{p.name}* (ур.{level})\n"
+                f"⛏️ Эффективность: {p.efficiency}\n"
+                f"💪 Прочность: {p.durability}\n"
+                f"💰 Цена: {p.price:.0f}\n\n"
+            )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_pickaxe_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def callback_leaderboard(self, callback: types.CallbackQuery):
+    top_players = self.game.get_leaderboard()
+    if not top_players:
+        text = "🏆 *Таблица лидеров*\n\nПока никто не добыл ресурсы!"
+    else:
+        text = "🏆 *Таблица лидеров (Топ-10)*\n\n"
+        for i, (name, pid, mined) in enumerate(top_players, 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "▫️"
+            text += f"{medal} #{pid} {name}: {mined} ед.\n"
+    await callback.message.answer(
+        text,
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
+async def callback_sell(self, callback: types.CallbackQuery):
+    resource_name = callback.data.split("_")[1]
+    player = self.game_data.get_player(callback.from_user.id)
+    amount = player["inventory"].get(resource_name, 0)
+    if amount == 0:
+        await callback.answer("❌ Нет этого ресурса!", show_alert=True)
+        return
+    success, message = self.game.sell_resource(player, resource_name, amount)
+    self.game_data.add_log(callback.from_user.id, callback.from_user.full_name, f"Продал {RESOURCES[resource_name].name} x{amount}")
+    self.game_data.save()
+    await callback.answer(message, show_alert=True)
+    await self.callback_shop(callback)
+
+async def callback_buy_pickaxe(self, callback: types.CallbackQuery):
+    level = int(callback.data.split("_")[2])
+    player = self.game_data.get_player(callback.from_user.id)
+    if level <= player["pickaxe_level"]:
+        await callback.answer("❌ У тебя уже есть эта кирка или лучше!", show_alert=True)
+        return
+    success, message = self.game.upgrade_pickaxe(player)
+    self.game_data.add_log(callback.from_user.id, callback.from_user.full_name, f"Купил кирку ур.{level}")
+    self.game_data.save()
+    await callback.answer(message, show_alert=True)
+
+async def callback_buy_house(self, callback: types.CallbackQuery):
+    level = int(callback.data.split("_")[2])
+    player = self.game_data.get_player(callback.from_user.id)
+    success, message = self.game.buy_house(player, level)
+    self.game_data.add_log(callback.from_user.id, callback.from_user.full_name, f"Купил дом ур.{level}")
+    self.game_data.save()
+    await callback.answer(message, show_alert=True)
+
+async def callback_repair_house(self, callback: types.CallbackQuery):
+    player = self.game_data.get_player(callback.from_user.id)
+    success, message = self.game.repair_house(player)
+    self.game_data.save()
+    await callback.answer(message, show_alert=True)
+
+async def callback_repair_pickaxe(self, callback: types.CallbackQuery):
+    player = self.game_data.get_player(callback.from_user.id)
+    success, message = self.game.repair_pickaxe(player)
+    self.game_data.save()
+    await callback.answer(message, show_alert=True)
+
+async def callback_back_main(self, callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "⛏️ *Главное меню*\nВыбери действие:",
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
     async def run(self):
         session = create_session()
         bot = Bot(token=self.token, session=session)
+        print("⛏️ Шахтер-Симулятор запускается...")
         try:
             me = await bot.get_me()
-            print(f"✅ Бот @{me.username} запущен!")
+            print(f"✅ Бот @{me.username} успешно запущен!")
+            asyncio.create_task(self._degradation_task())
             await self.dp.start_polling(bot)
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ Ошибка запуска: {e}")
+            print("💡 Попробуй включить VPN или используй прокси")
         finally:
             await bot.session.close()
+
+    async def _degradation_task(self):
+        while True:
+            await asyncio.sleep(3600)
+            for uid, player in self.game_data.data["players"].items():
+                if player["house_level"] > 0:
+                    result = self.game.degrade_house(player)
+            self.game_data.save()
+
 
 async def main():
     bot = MinerBot(API_TOKEN, ADMIN_ID)
     await bot.run()
 
+
 if __name__ == "__main__":
+    print("""
+    ⛏️  ШАХТЕР-СИМУЛЯТОР v2.0
+    ========================
+    🎮 Управление:
+    - Кнопка "Копать" - добыча ресурсов
+    - "Статистика" - просмотр прогресса
+    - "Инвентарь" - просмотр и продажа ресурсов
+    - "Магазин" - продажа ресурсов
+    - "Недвижимость" - покупка домов
+    - "Кирка" - улучшение инструмента
+    - "Таблица лидеров" - топ-10 игроков
+
+    💬 Текстовые команды:
+    Копать, Статистика, Инвентарь, Магазин, Недвижимость, Кирка, Топ
+
+    👑 Админ-команды:
+    /admin - панель администратора
+    /event x2 - ивент x2
+    /event reset - сброс ивентов
+    /event restore_mines - восстановление шахт
+    /event give_money ID СУММА - выдача денег
+    /ban ID - блокировка игрока
+    /unban ID - разблокировка
+    /setpickaxe ID УРОВЕНЬ - установить кирку
+    /sethouse ID УРОВЕНЬ - установить дом
+    /resetplayer ID - сбросить игрока
+    /announce ТЕКСТ - оповещение всем
+    /logs [число] - логи
+    /logall - все логи
+
+    💡 Новые фичи:
+    - Курс руды (меняется ±30%)
+    - ID игроков (от 1)
+    - Таблица лидеров
+    - Блокировка/разблокировка
+    - Приписка "Разработчик"
+    - Текстовые команды
+    - Авто-регистрация в группах
+    - Просмотр своего и чужого ID
+    - Перевод денег (/pay)
+    - Логи для админа
+    - Оповещение всем (/announce)
+    - Уведомления об ивентах
+    - Инвентарь сохраняется
+    - Энергия исправлена
+    - Ники из Telegram
+    """)
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("👋 Бот завершает работу...")
+        print("\n👋 Шахтер-симулятор завершает работу...")
