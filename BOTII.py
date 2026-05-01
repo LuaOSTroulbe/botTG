@@ -8,12 +8,13 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
-from google import genai
+import aiohttp
 
 API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
-GEMINI_API_KEY = 'AIzaSyCQRw4-puFAC-lFoDv36lYOUwfZvx6_eZs'
+GITHUB_TOKEN = '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'  # ← Замени на свой GitHub токен
 ADMIN_ID = 8420391742
 DATA_FILE = "ai_users.json"
+GITHUB_API_URL = "https://models.inference.ai.azure.com/chat/completions"
 
 def create_session():
     return AiohttpSession()
@@ -79,25 +80,38 @@ class UserData:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
 class AIBrain:
-    def __init__(self, api_key: str):
-        self.client = genai.Client(api_key=api_key)
+    def __init__(self, token: str):
+        self.token = token
 
-    def chat(self, text: str) -> str:
+    async def chat(self, text: str) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "messages": [
+                {"role": "user", "content": text}
+            ],
+            "model": "gpt-4o-mini",
+            "max_tokens": 500
+        }
         try:
-            response = self.client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=text
-            )
-            return response.text
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GITHUB_API_URL, json=payload, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["choices"][0]["message"]["content"]
+                    else:
+                        return f"Ошибка API: {resp.status}"
         except Exception as e:
             return f"Ошибка: {str(e)[:50]}"
 
 class AIBot:
-    def __init__(self, token: str, api_key: str):
+    def __init__(self, token: str, github_token: str):
         self.token = token
-        self.api_key = api_key
+        self.github_token = github_token
         self.users = UserData(DATA_FILE)
-        self.brain = AIBrain(api_key)
+        self.brain = AIBrain(github_token)
         self.dp = Dispatcher()
         self._setup_handlers()
 
@@ -126,7 +140,7 @@ class AIBot:
 
     async def cmd_help(self, message: types.Message):
         await message.answer(
-            f"Я работаю на базе Google Gemini 2.0 Flash.\n"
+            f"Я работаю на базе GPT-4o-mini через GitHub Models.\n"
             f"Просто напиши мне сообщение!"
         )
 
@@ -197,7 +211,7 @@ class AIBot:
             )
 
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        response = self.brain.chat(message.text)
+        response = await self.brain.chat(message.text)
         self.users.add_message(message.from_user.id)
         await message.answer(response)
 
@@ -215,7 +229,7 @@ class AIBot:
             await bot.session.close()
 
 async def main():
-    bot = AIBot(API_TOKEN, GEMINI_API_KEY)
+    bot = AIBot(API_TOKEN, GITHUB_TOKEN)
     await bot.run()
 
 if __name__ == "__main__":
