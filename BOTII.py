@@ -82,7 +82,7 @@ class AIBrain:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
 
-    async def chat(self, text: str) -> str:
+    def chat(self, text: str) -> str:
         try:
             response = self.client.models.generate_content(
                 model="gemini-2.0-flash",
@@ -119,20 +119,19 @@ class AIBot:
         user["name"] = message.from_user.full_name
         await message.answer(
             f"Привет! Я ИИ-помощник ВацапочкИИ.\n\n"
-            f"Доступные команды:\n"
+            f"Задай мне любой вопрос!\n\n"
             f"/help - помощь\n"
             f"/clear - очистить историю"
         )
 
     async def cmd_help(self, message: types.Message):
         await message.answer(
-            f"Помощь\n\n"
             f"Я работаю на базе Google Gemini 2.0 Flash.\n"
             f"Просто напиши мне сообщение!"
         )
 
     async def cmd_clear(self, message: types.Message):
-        await message.answer("История диалога очищена!")
+        await message.answer("История очищена!")
 
     async def cmd_ban(self, message: types.Message, command: CommandObject):
         if not self._is_admin(message.from_user.id):
@@ -198,7 +197,7 @@ class AIBot:
             )
 
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        response = await self.brain.chat(message.text)
+        response = self.brain.chat(message.text)
         self.users.add_message(message.from_user.id)
         await message.answer(response)
 
