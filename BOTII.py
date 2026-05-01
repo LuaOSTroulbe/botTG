@@ -12,8 +12,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 load_dotenv()
 
 # Конфигурация
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk")
+OPENROUTER_API_KEY = os.getenv("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")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Настройка логирования
@@ -49,7 +49,7 @@ class OpenRouterAI:
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "http://localhost:8000",  # Замените на ваш сайт
-            "X-Title": "Telegram AI Bot",              # Название вашего приложения
+            "X-Title": "ВацапочкИИ",              # Название вашего приложения
             "Content-Type": "application/json"
         }
     
