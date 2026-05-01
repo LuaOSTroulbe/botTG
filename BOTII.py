@@ -11,10 +11,8 @@ from aiogram.filters import Command, CommandObject
 import aiohttp
 
 API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
-HF_TOKEN = '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'  # ← Замени
 ADMIN_ID = 8420391742
 DATA_FILE = "ai_users.json"
-API_URL = "API_URL = "API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
 
 def create_session():
     return AiohttpSession()
@@ -36,16 +34,11 @@ class UserData:
     def get_user(self, user_id: int) -> Dict:
         uid = str(user_id)
         if uid not in self.data["users"]:
-            self.data["users"][uid] = {
-                "name": "Пользователь",
-                "total_messages": 0,
-                "created_at": datetime.now().isoformat()
-            }
+            self.data["users"][uid] = {"total_messages": 0}
         return self.data["users"][uid]
 
     def add_message(self, user_id: int):
-        user = self.get_user(user_id)
-        user["total_messages"] += 1
+        self.get_user(user_id)["total_messages"] += 1
         self.save()
 
     def is_banned(self, user_id: int) -> bool:
@@ -62,129 +55,97 @@ class UserData:
         self.save()
 
     def add_log(self, user_id: int, username: str, text: str):
+        self.data["logs"] = self.data.get("logs", [])
         self.data["logs"].append({
             "user_id": user_id,
             "username": username,
             "text": text[:100],
             "time": datetime.now().isoformat()
         })
-        if len(self.data["logs"]) > 100:
-            self.data["logs"] = self.data["logs"][-100:]
+        self.data["logs"] = self.data["logs"][-100:]
         self.save()
 
     def get_logs(self, count: int = 20) -> list:
-        return self.data["logs"][-count:]
+        return self.data.get("logs", [])[-count:]
 
     def save(self):
         with open(self.file_path, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
 class AIBrain:
-    def __init__(self, token: str):
-        self.token = token
-
     async def chat(self, text: str) -> str:
-        headers = {"Authorization": f"Bearer {self.token}"}
+        url = "https://duckduckgo.com/duckchat/v1/chat"
+        headers = {
+            "Content-Type": "application/json",
+            "x-vqd-4": "4-321" + str(int(datetime.now().timestamp()))[-6:]
+        }
         payload = {
-            "inputs": f"<s>[INST] {text} [/INST]",
-            "parameters": {"max_new_tokens": 500}
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": text}]
         }
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(API_URL, json=payload, headers=headers) as resp:
+                async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        return data[0]["generated_text"].split("[/INST]")[-1].strip()
-                    else:
-                        return f"Ошибка: {resp.status}"
+                        return data["message"]
+                    return f"Ошибка: {resp.status}"
         except Exception as e:
             return f"Ошибка: {str(e)[:50]}"
 
 class AIBot:
-    def __init__(self, token: str, hf_token: str):
+    def __init__(self, token: str):
         self.token = token
-        self.hf_token = hf_token
         self.users = UserData(DATA_FILE)
-        self.brain = AIBrain(hf_token)
+        self.brain = AIBrain()
         self.dp = Dispatcher()
         self._setup_handlers()
 
     def _setup_handlers(self):
         self.dp.message(Command("start"))(self.cmd_start)
-        self.dp.message(Command("help"))(self.cmd_help)
-        self.dp.message(Command("clear"))(self.cmd_clear)
         self.dp.message(Command("ban"))(self.cmd_ban)
         self.dp.message(Command("unban"))(self.cmd_unban)
         self.dp.message(Command("logs"))(self.cmd_logs)
-        self.dp.message(Command("logall"))(self.cmd_logall)
         self.dp.message(F.text)(self.handle_message)
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id == ADMIN_ID
 
     async def cmd_start(self, message: types.Message):
-        await message.answer(
-            f"Привет! Я ИИ-помощник на базе Mistral.\n\n"
-            f"Задай мне любой вопрос!\n\n"
-            f"/help - помощь\n"
-            f"/clear - очистить историю"
-        )
-
-    async def cmd_help(self, message: types.Message):
-        await message.answer("Я работаю на базе Mistral 7B. Просто напиши мне!")
-
-    async def cmd_clear(self, message: types.Message):
-        await message.answer("История очищена!")
+        await message.answer("Привет! Я бесплатный ИИ-помощник. Задай вопрос!")
 
     async def cmd_ban(self, message: types.Message, command: CommandObject):
         if not self._is_admin(message.from_user.id):
             return
         args = command.args.split() if command.args else []
-        if not args:
-            await message.answer("Укажи ID: /ban {user_id}")
-            return
-        self.users.ban_user(int(args[0]))
-        await message.answer(f"Пользователь {args[0]} заблокирован!")
+        if args:
+            self.users.ban_user(int(args[0]))
+            await message.answer(f"Пользователь {args[0]} заблокирован!")
 
     async def cmd_unban(self, message: types.Message, command: CommandObject):
         if not self._is_admin(message.from_user.id):
             return
         args = command.args.split() if command.args else []
-        if not args:
-            await message.answer("Укажи ID: /unban {user_id}")
-            return
-        self.users.unban_user(int(args[0]))
-        await message.answer(f"Пользователь {args[0]} разблокирован!")
+        if args:
+            self.users.unban_user(int(args[0]))
+            await message.answer(f"Пользователь {args[0]} разблокирован!")
 
-    async def cmd_logs(self, message: types.Message, command: CommandObject):
+    async def cmd_logs(self, message: types.Message):
         if not self._is_admin(message.from_user.id):
             return
-        args = command.args.split() if command.args else []
-        count = int(args[0]) if args else 10
-        logs = self.users.get_logs(count)
+        logs = self.users.get_logs(10)
         if not logs:
             await message.answer("Логи пусты")
             return
-        text = "Последние сообщения:\n\n"
+        text = "Сообщения:\n\n"
         for log in logs:
-            text += f"{log['username']} (ID:{log['user_id']}): {log['text']}\n"
-        await message.answer(text)
-
-    async def cmd_logall(self, message: types.Message):
-        if not self._is_admin(message.from_user.id):
-            return
-        logs = self.users.data["logs"]
-        text = f"Всего сообщений: {len(logs)}\n\n"
-        for log in logs[-30:]:
-            text += f"{log['username']} (ID:{log['user_id']}): {log['text']}\n"
+            text += f"{log['username']}: {log['text']}\n"
         await message.answer(text)
 
     async def handle_message(self, message: types.Message):
         if self.users.is_banned(message.from_user.id):
             await message.answer("Вы заблокированы!")
             return
-        if not message.text.startswith("/"):
-            self.users.add_log(message.from_user.id, message.from_user.full_name, message.text)
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
         response = await self.brain.chat(message.text)
         self.users.add_message(message.from_user.id)
@@ -203,11 +164,8 @@ class AIBot:
             await bot.session.close()
 
 async def main():
-    bot = AIBot(API_TOKEN, HF_TOKEN)
+    bot = AIBot(API_TOKEN)
     await bot.run()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Бот завершает работу...")
+    asyncio.run(main())
