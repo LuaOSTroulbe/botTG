@@ -1,25 +1,22 @@
 import asyncio
 import json
 import os
-import ssl
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-import aiohttp
+from aiogram.filters import Command, CommandObject
+from google import genai
 
 # ============================================
 # НАСТРОЙКИ
 # ============================================
 API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
-OPENROUTER_API_KEY = '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'  # ← ЗАМЕНИ НА СВОЙ КЛЮЧ
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+GEMINI_API_KEY = 'AIzaSyCQRw4-puFAC-lFoDv36lYOUwfZvx6_eZs'
+ADMIN_ID = 8420391742  # Твой ID
 DATA_FILE = "ai_users.json"
-ADMIN_ID = 8420391742
 
 # ============================================
 # ОБХОД БЛОКИРОВКИ
@@ -42,67 +39,70 @@ class UserData:
                     return json.load(f)
             except:
                 pass
-        return {"users": {}}
+        return {"users": {}, "banned": [], "logs": []}
 
     def get_user(self, user_id: int) -> Dict:
         uid = str(user_id)
         if uid not in self.data["users"]:
             self.data["users"][uid] = {
                 "name": "Пользователь",
-                "history": [],
                 "total_messages": 0,
                 "created_at": datetime.now().isoformat()
             }
         return self.data["users"][uid]
 
-    def add_message(self, user_id: int, role: str, content: str):
+    def add_message(self, user_id: int):
         user = self.get_user(user_id)
-        user["history"].append({"role": role, "content": content})
-        if len(user["history"]) > 20:  # Держим последние 20 сообщений
-            user["history"] = user["history"][-20:]
         user["total_messages"] += 1
         self.save()
+
+    def is_banned(self, user_id: int) -> bool:
+        return str(user_id) in self.data.get("banned", [])
+
+    def ban_user(self, user_id: int):
+        if str(user_id) not in self.data["banned"]:
+            self.data["banned"].append(str(user_id))
+        self.save()
+
+    def unban_user(self, user_id: int):
+        if str(user_id) in self.data["banned"]:
+            self.data["banned"].remove(str(user_id))
+        self.save()
+
+    def add_log(self, user_id: int, username: str, text: str):
+        self.data["logs"].append({
+            "user_id": user_id,
+            "username": username,
+            "text": text[:100],
+            "time": datetime.now().isoformat()
+        })
+        if len(self.data["logs"]) > 100:
+            self.data["logs"] = self.data["logs"][-100:]
+        self.save()
+
+    def get_logs(self, count: int = 20) -> list:
+        return self.data["logs"][-count:]
 
     def save(self):
         with open(self.file_path, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
 # ============================================
-# ИИ ЛОГИКА (OpenRouter)
+# ИИ ЛОГИКА (Gemini)
 # ============================================
 class AIBrain:
     def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.session = None
+        self.client = genai.Client(api_key=api_key)
 
-    async def __aenter__(self):
-        self.session = aiohttp.ClientSession(headers={
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        })
-        return self
-
-    async def __aexit__(self, *args):
-        if self.session:
-            await self.session.close()
-
-    async def chat(self, messages: list, model: str = "google/gemini-2.0-flash-001") -> str:
-        """Отправка запроса к OpenRouter"""
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": 1000,
-            "temperature": 0.7
-        }
+    async def chat(self, text: str) -> str:
         try:
-            async with self.session.post(OPENROUTER_URL, json=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
-                else:
-                    return f"❌ Ошибка API: {resp.status}"
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=text
+            )
+            return response.text
         except Exception as e:
-            return f"❌ Ошибка соединения: {str(e)[:50]}"
+            return f"❌ Ошибка: {str(e)[:50]}"
 
 # ============================================
 # БОТ
@@ -112,85 +112,122 @@ class AIBot:
         self.token = token
         self.api_key = api_key
         self.users = UserData(DATA_FILE)
+        self.brain = AIBrain(api_key)
         self.dp = Dispatcher()
         self._setup_handlers()
 
     def _setup_handlers(self):
+        # Команды для всех
         self.dp.message(Command("start"))(self.cmd_start)
+        self.dp.message(Command("help"))(self.cmd_help)
         self.dp.message(Command("clear"))(self.cmd_clear)
-        self.dp.message(Command("model"))(self.cmd_model)
+        # Админ-команды
+        self.dp.message(Command("ban"))(self.cmd_ban)
+        self.dp.message(Command("unban"))(self.cmd_unban)
+        self.dp.message(Command("logs"))(self.cmd_logs)
+        self.dp.message(Command("logall"))(self.cmd_logall)
+        # Сообщения
         self.dp.message(F.text)(self.handle_message)
-        self.dp.callback_query(F.data.startswith("model_"))(self.callback_model)
+
+    def _is_admin(self, user_id: int) -> bool:
+        return user_id == ADMIN_ID
 
     async def cmd_start(self, message: types.Message):
         user = self.users.get_user(message.from_user.id)
         user["name"] = message.from_user.full_name
-
-        dev_tag = " 👑 Разработчик" if message.from_user.id == ADMIN_ID else ""
         await message.answer(
-            f"🤖 *ИИ-Ассистент*\n\n"
-            f"👤 {message.from_user.full_name}{dev_tag}\n"
-            f"💬 Сообщений: {user['total_messages']}\n\n"
-            f"Я твой личный ИИ-помощник. Задай мне любой вопрос!\n\n"
-            f"📋 *Команды:*\n"
-            f"/clear - Очистить историю\n"
-            f"/model - Сменить модель ИИ",
+            f"🤖 *Дарова я ВацапочкИИ.*\n\n"
+            fИИ. Для развлечения, вайбкодинга, помощи в всяком разном и т.д."\n\n"
+            f"*Доступные команды:*\n"
+            f"/help - помощь\n"
+            f"/clear - очистить историю",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    async def cmd_help(self, message: types.Message):
+        await message.answer(
+            f"🤖 *Помощь*\n\n"
+            f"Я работаю на базе Google Gemini 2.0 Flash.\n"
+            f"Могу отвечать на вопросы, давать советы, "
+            f"помогать с текстами и идеями.\n\n"
+            f"Просто напиши мне сообщение!",
             parse_mode=ParseMode.MARKDOWN
         )
 
     async def cmd_clear(self, message: types.Message):
-        user = self.users.get_user(message.from_user.id)
-        user["history"] = []
-        self.users.save()
         await message.answer("✅ История диалога очищена!")
 
-    async def cmd_model(self, message: types.Message):
-        builder = InlineKeyboardBuilder()
-        builder.button(text="Gemini Flash (быстрый)", callback_data="model_gemini")
-        builder.button(text="GPT-3.5 Turbo", callback_data="model_gpt")
-        builder.button(text="Claude Haiku", callback_data="model_claude")
-        builder.adjust(1)
-        await message.answer("🎯 *Выбери модель ИИ:*", reply_markup=builder.as_markup(), parse_mode=ParseMode.MARKDOWN)
+    async def cmd_ban(self, message: types.Message, command: CommandObject):
+        if not self._is_admin(message.from_user.id):
+            return
+        args = command.args.split() if command.args else []
+        if not args:
+            await message.answer("❌ Укажи ID: /ban {user_id}")
+            return
+        user_id = int(args[0])
+        self.users.ban_user(user_id)
+        await message.answer(f"🚫 Пользователь {user_id} заблокирован!")
 
-    async def callback_model(self, callback: types.CallbackQuery):
-        model_map = {
-            "model_gemini": "google/gemini-2.0-flash-001",
-            "model_gpt": "openai/gpt-3.5-turbo",
-            "model_claude": "anthropic/claude-3-haiku"
-        }
-        model = model_map.get(callback.data, "google/gemini-2.0-flash-001")
-        user = self.users.get_user(callback.from_user.id)
-        user["current_model"] = model
-        self.users.save()
-        await callback.answer(f"✅ Модель: {model}", show_alert=True)
-        await callback.message.delete()
+    async def cmd_unban(self, message: types.Message, command: CommandObject):
+        if not self._is_admin(message.from_user.id):
+            return
+        args = command.args.split() if command.args else []
+        if not args:
+            await message.answer("❌ Укажи ID: /unban {user_id}")
+            return
+        user_id = int(args[0])
+        self.users.unban_user(user_id)
+        await message.answer(f"✅ Пользователь {user_id} разблокирован!")
+
+    async def cmd_logs(self, message: types.Message, command: CommandObject):
+        if not self._is_admin(message.from_user.id):
+            return
+        args = command.args.split() if command.args else []
+        count = int(args[0]) if args else 10
+        logs = self.users.get_logs(count)
+        if not logs:
+            await message.answer("📋 Логи пусты")
+            return
+        text = "📋 *Последние сообщения:*\n\n"
+        for log in logs:
+            text += f"👤 {log['username']} (ID:{log['user_id']}): {log['text']}\n"
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+
+    async def cmd_logall(self, message: types.Message):
+        if not self._is_admin(message.from_user.id):
+            return
+        logs = self.users.data["logs"]
+        if not logs:
+            await message.answer("📋 Логи пусты")
+            return
+        text = f"📋 *Всего сообщений: {len(logs)}*\n\n"
+        for log in logs[-30:]:
+            text += f"👤 {log['username']} (ID:{log['user_id']}): {log['text']}\n"
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
 
     async def handle_message(self, message: types.Message):
+        # Проверка бана
+        if self.users.is_banned(message.from_user.id):
+            await message.answer("🚫 Вы заблокированы!")
+            return
+
         user = self.users.get_user(message.from_user.id)
         user["name"] = message.from_user.full_name
 
-        # Индикатор "печатает"
+        # Логируем (без команды для приватности)
+        if not message.text.startswith("/"):
+            self.users.add_log(
+                message.from_user.id,
+                message.from_user.full_name,
+                message.text
+            )
+
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
-        # Формируем контекст
-        system_msg = {
-            "role": "system",
-            "content": f"Ты - дружелюбный ИИ-ассистент. Общаешься с {message.from_user.full_name}. Отвечай на русском языке."
-        }
-        
-        model = user.get("current_model", "google/gemini-2.0-flash-001")
-        messages = [system_msg] + user["history"][-15:] + [{"role": "user", "content": message.text}]
+        response = await self.brain.chat(message.text)
+        self.users.add_message(message.from_user.id)
 
-        # Запрос к ИИ
-        async with AIBrain(self.api_key) as ai:
-            response = await ai.chat(messages, model)
-
-        # Сохраняем историю
-        self.users.add_message(message.from_user.id, "user", message.text)
-        self.users.add_message(message.from_user.id, "assistant", response)
-
-        # Отправляем ответ
-        await message.answer(response, parse_mode=ParseMode.MARKDOWN)
+        await message.answer(response)
 
     async def run(self):
         session = create_session()
@@ -201,16 +238,16 @@ class AIBot:
             print(f"✅ Бот @{me.username} успешно запущен!")
             await self.dp.start_polling(bot)
         except Exception as e:
-            print(f"❌ Ошибка запуска: {e}")
+            print(f"❌ Ошибка: {e}")
         finally:
             await bot.session.close()
 
 async def main():
-    bot = AIBot(API_TOKEN, OPENROUTER_API_KEY)
+    bot = AIBot(API_TOKEN, GEMINI_API_KEY)
     await bot.run()
 
 if __name__ == "__main__":
-    print("🤖 ИИ БОТ ДЛЯ TELEGRAM")
+    print("🤖 ИИ БОТ ВАЦАПОЧКИИ")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
