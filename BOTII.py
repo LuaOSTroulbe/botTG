@@ -11,7 +11,7 @@ from aiogram.filters import Command, CommandObject
 import aiohttp
 
 API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
-GITHUB_TOKEN = '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'  # ← Замени на свой GitHub токен
+GITHUB_TOKEN = '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'  # ← Замени на свой GitHub токен
 ADMIN_ID = 8420391742
 DATA_FILE = "ai_users.json"
 GITHUB_API_URL = "https://models.inference.ai.azure.com/chat/completions"
