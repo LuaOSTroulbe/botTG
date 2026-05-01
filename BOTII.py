@@ -11,10 +11,10 @@ from aiogram.filters import Command, CommandObject
 import aiohttp
 
 API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
-GITHUB_TOKEN = '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'  # ← Замени на свой GitHub токен
+HF_TOKEN = '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'  # ← Замени
 ADMIN_ID = 8420391742
 DATA_FILE = "ai_users.json"
-GITHUB_API_URL = "https://models.inference.ai.azure.com/chat/completions"
+API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
 
 def create_session():
     return AiohttpSession()
@@ -84,34 +84,28 @@ class AIBrain:
         self.token = token
 
     async def chat(self, text: str) -> str:
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {self.token}"}
         payload = {
-            "messages": [
-                {"role": "user", "content": text}
-            ],
-            "model": "gpt-4o-mini",
-            "max_tokens": 500
+            "inputs": f"<s>[INST] {text} [/INST]",
+            "parameters": {"max_new_tokens": 500}
         }
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(GITHUB_API_URL, json=payload, headers=headers) as resp:
+                async with session.post(API_URL, json=payload, headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        return data["choices"][0]["message"]["content"]
+                        return data[0]["generated_text"].split("[/INST]")[-1].strip()
                     else:
-                        return f"Ошибка API: {resp.status}"
+                        return f"Ошибка: {resp.status}"
         except Exception as e:
             return f"Ошибка: {str(e)[:50]}"
 
 class AIBot:
-    def __init__(self, token: str, github_token: str):
+    def __init__(self, token: str, hf_token: str):
         self.token = token
-        self.github_token = github_token
+        self.hf_token = hf_token
         self.users = UserData(DATA_FILE)
-        self.brain = AIBrain(github_token)
+        self.brain = AIBrain(hf_token)
         self.dp = Dispatcher()
         self._setup_handlers()
 
@@ -129,20 +123,15 @@ class AIBot:
         return user_id == ADMIN_ID
 
     async def cmd_start(self, message: types.Message):
-        user = self.users.get_user(message.from_user.id)
-        user["name"] = message.from_user.full_name
         await message.answer(
-            f"Привет! Я ИИ-помощник ВацапочкИИ.\n\n"
+            f"Привет! Я ИИ-помощник на базе Mistral.\n\n"
             f"Задай мне любой вопрос!\n\n"
             f"/help - помощь\n"
             f"/clear - очистить историю"
         )
 
     async def cmd_help(self, message: types.Message):
-        await message.answer(
-            f"Я работаю на базе GPT-4o-mini через GitHub Models.\n"
-            f"Просто напиши мне сообщение!"
-        )
+        await message.answer("Я работаю на базе Mistral 7B. Просто напиши мне!")
 
     async def cmd_clear(self, message: types.Message):
         await message.answer("История очищена!")
@@ -154,9 +143,8 @@ class AIBot:
         if not args:
             await message.answer("Укажи ID: /ban {user_id}")
             return
-        user_id = int(args[0])
-        self.users.ban_user(user_id)
-        await message.answer(f"Пользователь {user_id} заблокирован!")
+        self.users.ban_user(int(args[0]))
+        await message.answer(f"Пользователь {args[0]} заблокирован!")
 
     async def cmd_unban(self, message: types.Message, command: CommandObject):
         if not self._is_admin(message.from_user.id):
@@ -165,9 +153,8 @@ class AIBot:
         if not args:
             await message.answer("Укажи ID: /unban {user_id}")
             return
-        user_id = int(args[0])
-        self.users.unban_user(user_id)
-        await message.answer(f"Пользователь {user_id} разблокирован!")
+        self.users.unban_user(int(args[0]))
+        await message.answer(f"Пользователь {args[0]} разблокирован!")
 
     async def cmd_logs(self, message: types.Message, command: CommandObject):
         if not self._is_admin(message.from_user.id):
@@ -187,9 +174,6 @@ class AIBot:
         if not self._is_admin(message.from_user.id):
             return
         logs = self.users.data["logs"]
-        if not logs:
-            await message.answer("Логи пусты")
-            return
         text = f"Всего сообщений: {len(logs)}\n\n"
         for log in logs[-30:]:
             text += f"{log['username']} (ID:{log['user_id']}): {log['text']}\n"
@@ -199,17 +183,8 @@ class AIBot:
         if self.users.is_banned(message.from_user.id):
             await message.answer("Вы заблокированы!")
             return
-
-        user = self.users.get_user(message.from_user.id)
-        user["name"] = message.from_user.full_name
-
         if not message.text.startswith("/"):
-            self.users.add_log(
-                message.from_user.id,
-                message.from_user.full_name,
-                message.text
-            )
-
+            self.users.add_log(message.from_user.id, message.from_user.full_name, message.text)
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
         response = await self.brain.chat(message.text)
         self.users.add_message(message.from_user.id)
@@ -218,7 +193,6 @@ class AIBot:
     async def run(self):
         session = create_session()
         bot = Bot(token=self.token, session=session)
-        print("Бот запускается...")
         try:
             me = await bot.get_me()
             print(f"Бот @{me.username} запущен!")
@@ -229,7 +203,7 @@ class AIBot:
             await bot.session.close()
 
 async def main():
-    bot = AIBot(API_TOKEN, GITHUB_TOKEN)
+    bot = AIBot(API_TOKEN, HF_TOKEN)
     await bot.run()
 
 if __name__ == "__main__":
