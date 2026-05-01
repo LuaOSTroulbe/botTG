@@ -10,23 +10,14 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from google import genai
 
-# ============================================
-# НАСТРОЙКИ
-# ============================================
 API_TOKEN = '8502439228:AAGUzo_uGZlNy0K1sCtimmEwb0uU-tQsaxk'
 GEMINI_API_KEY = 'AIzaSyCQRw4-puFAC-lFoDv36lYOUwfZvx6_eZs'
-ADMIN_ID = 8420391742  # Твой ID
+ADMIN_ID = 8420391742
 DATA_FILE = "ai_users.json"
 
-# ============================================
-# ОБХОД БЛОКИРОВКИ
-# ============================================
 def create_session():
     return AiohttpSession()
 
-# ============================================
-# ПАМЯТЬ ПОЛЬЗОВАТЕЛЕЙ
-# ============================================
 class UserData:
     def __init__(self, file_path: str):
         self.file_path = file_path
@@ -87,9 +78,6 @@ class UserData:
         with open(self.file_path, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
-# ============================================
-# ИИ ЛОГИКА (Gemini)
-# ============================================
 class AIBrain:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
@@ -102,11 +90,8 @@ class AIBrain:
             )
             return response.text
         except Exception as e:
-            return f"❌ Ошибка: {str(e)[:50]}"
+            return f"Ошибка: {str(e)[:50]}"
 
-# ============================================
-# БОТ
-# ============================================
 class AIBot:
     def __init__(self, token: str, api_key: str):
         self.token = token
@@ -117,16 +102,13 @@ class AIBot:
         self._setup_handlers()
 
     def _setup_handlers(self):
-        # Команды для всех
         self.dp.message(Command("start"))(self.cmd_start)
         self.dp.message(Command("help"))(self.cmd_help)
         self.dp.message(Command("clear"))(self.cmd_clear)
-        # Админ-команды
         self.dp.message(Command("ban"))(self.cmd_ban)
         self.dp.message(Command("unban"))(self.cmd_unban)
         self.dp.message(Command("logs"))(self.cmd_logs)
         self.dp.message(Command("logall"))(self.cmd_logall)
-        # Сообщения
         self.dp.message(F.text)(self.handle_message)
 
     def _is_admin(self, user_id: int) -> bool:
@@ -136,48 +118,43 @@ class AIBot:
         user = self.users.get_user(message.from_user.id)
         user["name"] = message.from_user.full_name
         await message.answer(
-            f"🤖 *Дарова я ВацапочкИИ.*\n\n"
-            fИИ. Для развлечения, вайбкодинга, помощи в всяком разном и т.д."\n\n"
-            f"*Доступные команды:*\n"
+            f"Привет! Я ИИ-помощник ВацапочкИИ.\n\n"
+            f"Доступные команды:\n"
             f"/help - помощь\n"
-            f"/clear - очистить историю",
-            parse_mode=ParseMode.MARKDOWN
+            f"/clear - очистить историю"
         )
 
     async def cmd_help(self, message: types.Message):
         await message.answer(
-            f"🤖 *Помощь*\n\n"
+            f"Помощь\n\n"
             f"Я работаю на базе Google Gemini 2.0 Flash.\n"
-            f"Могу отвечать на вопросы, давать советы, "
-            f"помогать с текстами и идеями.\n\n"
-            f"Просто напиши мне сообщение!",
-            parse_mode=ParseMode.MARKDOWN
+            f"Просто напиши мне сообщение!"
         )
 
     async def cmd_clear(self, message: types.Message):
-        await message.answer("✅ История диалога очищена!")
+        await message.answer("История диалога очищена!")
 
     async def cmd_ban(self, message: types.Message, command: CommandObject):
         if not self._is_admin(message.from_user.id):
             return
         args = command.args.split() if command.args else []
         if not args:
-            await message.answer("❌ Укажи ID: /ban {user_id}")
+            await message.answer("Укажи ID: /ban {user_id}")
             return
         user_id = int(args[0])
         self.users.ban_user(user_id)
-        await message.answer(f"🚫 Пользователь {user_id} заблокирован!")
+        await message.answer(f"Пользователь {user_id} заблокирован!")
 
     async def cmd_unban(self, message: types.Message, command: CommandObject):
         if not self._is_admin(message.from_user.id):
             return
         args = command.args.split() if command.args else []
         if not args:
-            await message.answer("❌ Укажи ID: /unban {user_id}")
+            await message.answer("Укажи ID: /unban {user_id}")
             return
         user_id = int(args[0])
         self.users.unban_user(user_id)
-        await message.answer(f"✅ Пользователь {user_id} разблокирован!")
+        await message.answer(f"Пользователь {user_id} разблокирован!")
 
     async def cmd_logs(self, message: types.Message, command: CommandObject):
         if not self._is_admin(message.from_user.id):
@@ -186,35 +163,33 @@ class AIBot:
         count = int(args[0]) if args else 10
         logs = self.users.get_logs(count)
         if not logs:
-            await message.answer("📋 Логи пусты")
+            await message.answer("Логи пусты")
             return
-        text = "📋 *Последние сообщения:*\n\n"
+        text = "Последние сообщения:\n\n"
         for log in logs:
-            text += f"👤 {log['username']} (ID:{log['user_id']}): {log['text']}\n"
-        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+            text += f"{log['username']} (ID:{log['user_id']}): {log['text']}\n"
+        await message.answer(text)
 
     async def cmd_logall(self, message: types.Message):
         if not self._is_admin(message.from_user.id):
             return
         logs = self.users.data["logs"]
         if not logs:
-            await message.answer("📋 Логи пусты")
+            await message.answer("Логи пусты")
             return
-        text = f"📋 *Всего сообщений: {len(logs)}*\n\n"
+        text = f"Всего сообщений: {len(logs)}\n\n"
         for log in logs[-30:]:
-            text += f"👤 {log['username']} (ID:{log['user_id']}): {log['text']}\n"
-        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+            text += f"{log['username']} (ID:{log['user_id']}): {log['text']}\n"
+        await message.answer(text)
 
     async def handle_message(self, message: types.Message):
-        # Проверка бана
         if self.users.is_banned(message.from_user.id):
-            await message.answer("🚫 Вы заблокированы!")
+            await message.answer("Вы заблокированы!")
             return
 
         user = self.users.get_user(message.from_user.id)
         user["name"] = message.from_user.full_name
 
-        # Логируем (без команды для приватности)
         if not message.text.startswith("/"):
             self.users.add_log(
                 message.from_user.id,
@@ -223,22 +198,20 @@ class AIBot:
             )
 
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-
         response = await self.brain.chat(message.text)
         self.users.add_message(message.from_user.id)
-
         await message.answer(response)
 
     async def run(self):
         session = create_session()
         bot = Bot(token=self.token, session=session)
-        print("🤖 ИИ-Бот запускается...")
+        print("Бот запускается...")
         try:
             me = await bot.get_me()
-            print(f"✅ Бот @{me.username} успешно запущен!")
+            print(f"Бот @{me.username} запущен!")
             await self.dp.start_polling(bot)
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"Ошибка: {e}")
         finally:
             await bot.session.close()
 
@@ -247,8 +220,7 @@ async def main():
     await bot.run()
 
 if __name__ == "__main__":
-    print("🤖 ИИ БОТ ВАЦАПОЧКИИ")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Бот завершает работу...")
+        print("Бот завершает работу...")
